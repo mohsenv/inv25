@@ -22,7 +22,44 @@ import { PersianDatePicker } from "@/components/ui/persian-date-picker";
 
 // GraphQL queries
 const GET_ALL_DOCUMENTS = gql`
-  query GetAllDocuments($documentType: DocumentType) {
+  query GetAllDocuments {
+    getDocuments {
+      id
+      documentType
+      documentNumber
+      supplier {
+        id
+        name
+      }
+      customer {
+        id
+        name
+      }
+      items {
+        id
+        product {
+          id
+          name
+          code
+          unit
+        }
+        quantity
+        unitPrice
+        totalPrice
+        description
+      }
+      totalAmount
+      description
+      date
+      isFinalized
+      createdAt
+      updatedAt
+    }
+  }
+`;
+
+const GET_DOCUMENTS_BY_TYPE = gql`
+  query GetDocumentsByType($documentType: DocumentType) {
     getDocuments(documentType: $documentType) {
       id
       documentType
@@ -214,7 +251,6 @@ const documentSchema = z.object({
   customerId: z.string().optional(),
   description: z.string().optional(),
   date: z.number(),
-  items: z.array(documentItemSchema).min(1, "حداقل یک قلم کالا الزامی است"),
 });
 
 type DocumentItemFormData = z.infer<typeof documentItemSchema>;
@@ -249,7 +285,7 @@ interface Customer {
 }
 
 interface DocumentItem {
-  id: number;
+  id: string;
   product: Product;
   quantity: number;
   unitPrice: number;
@@ -301,7 +337,10 @@ export default function DocumentsPage() {
   const [isConnected, setIsConnected] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingDocument, setEditingDocument] = useState<Document | null>(null);
-  const [nextItemId, setNextItemId] = useState(1);
+  // nextItemId is no longer used since we generate unique IDs for new items
+  const [viewingDocument, setViewingDocument] = useState<Document | null>(null);
+  const [isViewDialogOpen, setIsViewDialogOpen] = useState(false);
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
   
   // State for adding new products
   const [newProductName, setNewProductName] = useState("");
@@ -320,7 +359,6 @@ export default function DocumentsPage() {
       customerId: "",
       description: "",
       date: Date.now(),
-      items: [],
     },
   });
 
@@ -343,34 +381,28 @@ export default function DocumentsPage() {
       
       try {
         // First test the connection
-        console.log('Testing database connection...');
         const connectionTest = await apolloClient.query({
           query: TEST_CONNECTION,
           fetchPolicy: 'no-cache'
         });
         
-        console.log('Connection test result:', connectionTest);
         setIsConnected(true);
         
-        // Load all required data
-        await Promise.all([
-          loadDocuments(),
-          loadProducts(),
-          loadSuppliers(),
-          loadCustomers()
-        ]);
+        // Load all required data sequentially to avoid race conditions
+        await loadDocuments();
+        await loadProducts();
+        await loadSuppliers();
+        await loadCustomers();
         
       } catch (err: any) {
-        console.error('❌ Error in initializeData:', err);
+        console.error('Error in initializeData:', err);
         setIsConnected(false);
         
         let errorMessage = "خطا در ارتباط با پایگاه داده";
         
         if (err.networkError) {
-          console.error('Network error:', err.networkError);
           errorMessage = "خطا در ارتباط با سرور. لطفاً اتصال اینترنت خود را بررسی کنید.";
         } else if (err.graphQLErrors && err.graphQLErrors.length > 0) {
-          console.error('GraphQL errors:', err.graphQLErrors);
           errorMessage = `خطای GraphQL: ${err.graphQLErrors.map((e: any) => e.message).join(', ')}`;
         } else if (err.message) {
           errorMessage = `خطا: ${err.message}`;
@@ -389,19 +421,27 @@ export default function DocumentsPage() {
     try {
       const result = await apolloClient.query({
         query: GET_ALL_DOCUMENTS,
-        fetchPolicy: 'no-cache',
+        fetchPolicy: 'network-only', // Always fetch from network to get latest data
         errorPolicy: 'all'
       });
+      
+      if (result.errors) {
+        console.error('GraphQL Errors:', result.errors);
+        setError(`خطای GraphQL: ${result.errors.map(e => e.message).join(', ')}`);
+        return;
+      }
       
       if (result.data && (result.data as any).getDocuments) {
         const docs = (result.data as any).getDocuments;
         setDocuments(docs);
         setFilteredDocuments(docs);
-        console.log('✅ Loaded documents successfully:', docs.length, 'documents');
+      } else {
+        setDocuments([]);
+        setFilteredDocuments([]);
       }
     } catch (err: any) {
       console.error('Error loading documents:', err);
-      setError("خطا در بارگذاری اسناد");
+      setError(`خطا در بارگذاری اسناد: ${err.message}`);
     }
   };
 
@@ -486,13 +526,25 @@ export default function DocumentsPage() {
     return "-";
   };
 
-  const formatDocumentDate = (dateValue: number) => {
+  const formatDocumentDate = (dateValue: number | string | Date) => {
     try {
       if (!dateValue) return 'تاریخ نامشخص';
       
-      const date = new Date(dateValue);
+      let date: Date;
+      
+      if (dateValue instanceof Date) {
+        date = dateValue;
+      } else if (typeof dateValue === 'string') {
+        date = new Date(dateValue);
+      } else if (typeof dateValue === 'number') {
+        date = new Date(dateValue);
+      } else {
+        console.warn('Invalid date value type:', typeof dateValue, dateValue);
+        return 'نوع تاریخ نامعتبر';
+      }
       
       if (isNaN(date.getTime())) {
+        console.warn('Invalid date value:', dateValue);
         return 'تاریخ نامعتبر';
       }
       
@@ -506,7 +558,6 @@ export default function DocumentsPage() {
   const openAddDialog = () => {
     setEditingDocument(null);
     setCurrentItems([]);
-    setNextItemId(1);
     documentForm.reset({
       documentType: "PURCHASE_INVOICE",
       documentNumber: "",
@@ -514,7 +565,6 @@ export default function DocumentsPage() {
       customerId: "",
       description: "",
       date: Date.now(),
-      items: [],
     });
     itemForm.reset();
     setIsDialogOpen(true);
@@ -522,11 +572,16 @@ export default function DocumentsPage() {
 
   const openEditDialog = (doc: Document) => {
     setEditingDocument(doc);
-    setCurrentItems(doc.items.map((item, index) => ({
-      ...item,
-      id: index + 1
-    })));
-    setNextItemId(doc.items.length + 1);
+    setCurrentItems(doc.items || []);
+    
+    // Clear any item editing state
+    setEditingItemId(null);
+    itemForm.reset({
+      productId: "",
+      quantity: 0,
+      unitPrice: 0,
+      description: "",
+    });
     
     documentForm.reset({
       documentType: doc.documentType as any,
@@ -535,7 +590,6 @@ export default function DocumentsPage() {
       customerId: doc.customer?.id || "",
       description: doc.description || "",
       date: doc.date,
-      items: [],
     });
     
     setIsDialogOpen(true);
@@ -545,16 +599,87 @@ export default function DocumentsPage() {
     setIsDialogOpen(false);
     setEditingDocument(null);
     setCurrentItems([]);
+    setEditingItemId(null);
     documentForm.reset();
-    itemForm.reset();
+    itemForm.reset({
+      productId: "",
+      quantity: 0,
+      unitPrice: 0,
+      description: "",
+    });
   };
 
-  const handleAddItem = (data: DocumentItemFormData) => {
+  const openViewDialog = (doc: Document) => {
+    setViewingDocument(doc);
+    setIsViewDialogOpen(true);
+  };
+
+  const closeViewDialog = () => {
+    setIsViewDialogOpen(false);
+    setViewingDocument(null);
+  };
+
+  const handleAddItem = (data?: DocumentItemFormData) => {
+    // If data is not provided, get values from the form
+    const formData = data || itemForm.getValues();
+    
+    const product = products.find(p => p.id === formData.productId);
+    if (!product) return;
+
+    // Generate a unique ID for new items that won't conflict with existing IDs
+    const newItemId = `new_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    const newItem: DocumentItem = {
+      id: newItemId,
+      product,
+      quantity: formData.quantity,
+      unitPrice: formData.unitPrice,
+      totalPrice: formData.quantity * formData.unitPrice,
+      description: formData.description,
+    };
+
+    const newItems = [...currentItems, newItem];
+    setCurrentItems(newItems);
+    itemForm.reset({
+      productId: "",
+      quantity: 0,
+      unitPrice: 0,
+      description: "",
+    });
+  };
+
+  const handleRemoveItem = (itemId: string) => {
+    setCurrentItems(currentItems.filter(item => item.id !== itemId));
+  };
+
+  const startEditingItem = (item: DocumentItem) => {
+    setEditingItemId(item.id);
+    itemForm.reset({
+      productId: item.product.id,
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      description: item.description || "",
+    });
+  };
+
+  const cancelEditingItem = () => {
+    setEditingItemId(null);
+    itemForm.reset({
+      productId: "",
+      quantity: 0,
+      unitPrice: 0,
+      description: "",
+    });
+  };
+
+  const updateItem = (data: DocumentItemFormData) => {
+    if (!editingItemId) return;
+    
     const product = products.find(p => p.id === data.productId);
     if (!product) return;
 
-    const newItem: DocumentItem = {
-      id: nextItemId,
+    const updatedItem: DocumentItem = {
+      id: editingItemId,
       product,
       quantity: data.quantity,
       unitPrice: data.unitPrice,
@@ -562,21 +687,36 @@ export default function DocumentsPage() {
       description: data.description,
     };
 
-    setCurrentItems([...currentItems, newItem]);
-    setNextItemId(nextItemId + 1);
-    itemForm.reset();
-  };
-
-  const handleRemoveItem = (itemId: number) => {
-    setCurrentItems(currentItems.filter(item => item.id !== itemId));
+    const newItems = currentItems.map(item => 
+      item.id === editingItemId ? updatedItem : item
+    );
+    
+    setCurrentItems(newItems);
+    
+    // Clear editing state and reset form to empty values
+    setEditingItemId(null);
+    itemForm.reset({
+      productId: "",
+      quantity: 0,
+      unitPrice: 0,
+      description: "",
+    });
   };
 
   const handleSubmitDocument = async (data: DocumentFormData) => {
     setIsSubmitting(true);
     setError("");
 
+    // Validate that we have at least one item
+    if (currentItems.length === 0) {
+      setError("حداقل یک قلم کالا الزامی است");
+      setIsSubmitting(false);
+      return;
+    }
+
     try {
       // Prepare items for GraphQL
+      // Filter out ID field since backend generates its own IDs
       const items = currentItems.map(item => ({
         productId: item.product.id,
         quantity: item.quantity,
@@ -587,8 +727,8 @@ export default function DocumentsPage() {
       const input = {
         documentType: data.documentType,
         documentNumber: data.documentNumber,
-        supplierId: data.supplierId || undefined,
-        customerId: data.customerId || undefined,
+        ...(data.supplierId && { supplierId: data.supplierId }),
+        ...(data.customerId && { customerId: data.customerId }),
         description: data.description || "",
         date: data.date,
         items
@@ -615,8 +755,15 @@ export default function DocumentsPage() {
       }
 
       if (result.data) {
+        // Refetch queries to ensure fresh data
+        await apolloClient.refetchQueries({
+          include: [GET_ALL_DOCUMENTS]
+        });
+        
         await loadDocuments();
         closeDialog();
+      } else {
+        setError("خطا در ذخیره سند - پاسخ خالی از سرور");
       }
     } catch (err: any) {
       console.error('Error saving document:', err);
@@ -717,7 +864,7 @@ export default function DocumentsPage() {
                 </Button>
               </DialogTrigger>
               
-              <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+              <DialogContent className="w-full max-w-[80vw] sm:max-w-[80vw] md:max-w-[80vw] lg:max-w-[80vw] xl:max-w-[80vw] max-h-[90vh] overflow-y-auto mx-auto my-4 p-0">
                 <DialogHeader>
                   <DialogTitle>
                     {editingDocument ? "ویرایش سند" : "افزودن سند جدید"}
@@ -726,7 +873,12 @@ export default function DocumentsPage() {
                 
                 <div className="space-y-6">
                   <Form {...documentForm}>
-                    <form onSubmit={documentForm.handleSubmit(handleSubmitDocument)} className="space-y-4">
+                    <form id="document-form" onSubmit={documentForm.handleSubmit(handleSubmitDocument)} className="space-y-4">
+                      {documentForm.formState.errors && Object.keys(documentForm.formState.errors).length > 0 && (
+                        <div className="text-red-500 text-sm mb-4">
+                          لطفاً خطاهای فرم را بررسی کنید
+                        </div>
+                      )}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <FormField
                           control={documentForm.control}
@@ -859,26 +1011,37 @@ export default function DocumentsPage() {
                     </CardHeader>
                     <CardContent>
                       <Form {...itemForm}>
-                        <form onSubmit={itemForm.handleSubmit(handleAddItem)} className="space-y-4">
+                        <form onSubmit={(e) => { 
+                          e.preventDefault(); 
+                          if (editingItemId) {
+                            updateItem(itemForm.getValues());
+                          } else {
+                            handleAddItem(itemForm.getValues());
+                          }
+                        }} className="space-y-4">
                           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                             <div className="md:col-span-2">
-                              <FormItem>
-                                <FormLabel>کالا *</FormLabel>
-                                <div className="flex gap-2">
-                                  <Select onValueChange={(value) => itemForm.setValue('productId', value)} value={itemForm.watch('productId')}>
-                                    <FormControl>
-                                      <SelectTrigger>
-                                        <SelectValue placeholder="انتخاب کالا" />
-                                      </SelectTrigger>
-                                    </FormControl>
-                                    <SelectContent>
-                                      {products.map(product => (
-                                        <SelectItem key={product.id} value={product.id}>
-                                          {product.name} ({product.code})
-                                        </SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
+                              <FormField
+                                control={itemForm.control}
+                                name="productId"
+                                render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>کالا *</FormLabel>
+                                    <div className="flex gap-2">
+                                      <Select onValueChange={field.onChange} value={field.value}>
+                                        <FormControl>
+                                          <SelectTrigger>
+                                            <SelectValue placeholder="انتخاب کالا" />
+                                          </SelectTrigger>
+                                        </FormControl>
+                                        <SelectContent>
+                                          {products.map(product => (
+                                            <SelectItem key={product.id} value={product.id}>
+                                              {product.name} ({product.code})
+                                            </SelectItem>
+                                          ))}
+                                        </SelectContent>
+                                      </Select>
                                   <Dialog>
                                     <DialogTrigger asChild>
                                       <Button type="button" variant="outline" size="icon">
@@ -934,10 +1097,12 @@ export default function DocumentsPage() {
                                         </Button>
                                       </div>
                                     </DialogContent>
-                                  </Dialog>
-                                </div>
-                                <FormMessage />
-                              </FormItem>
+                                      </Dialog>
+                                    </div>
+                                    <FormMessage />
+                                  </FormItem>
+                                )}
+                              />
                             </div>
                             
                             <FormField
@@ -993,8 +1158,28 @@ export default function DocumentsPage() {
                                   readOnly
                                 />
                               </div>
-                              <Button type="submit" className="h-10">
-                                افزودن
+                              {editingItemId && (
+                                <Button 
+                                  type="button" 
+                                  onClick={cancelEditingItem}
+                                  variant="outline"
+                                  className="h-10"
+                                >
+                                  انصراف
+                                </Button>
+                              )}
+                              <Button 
+                                type="button" 
+                                onClick={() => {
+                                  if (editingItemId) {
+                                    updateItem(itemForm.getValues());
+                                  } else {
+                                    handleAddItem(itemForm.getValues());
+                                  }
+                                }} 
+                                className="h-10"
+                              >
+                                {editingItemId ? "بروزرسانی" : "افزودن"}
                               </Button>
                             </div>
                           </div>
@@ -1038,13 +1223,22 @@ export default function DocumentsPage() {
                                   <TableCell className="ltr-content">{formatPersianCurrency(item.unitPrice)}</TableCell>
                                   <TableCell className="ltr-content font-medium">{formatPersianCurrency(item.totalPrice)}</TableCell>
                                   <TableCell>
-                                    <Button 
-                                      size="sm" 
-                                      variant="outline" 
-                                      onClick={() => handleRemoveItem(item.id)}
-                                    >
-                                      <Trash2 className="h-4 w-4" />
-                                    </Button>
+                                    <div className="flex gap-2">
+                                      <Button 
+                                        size="sm" 
+                                        variant="outline" 
+                                        onClick={() => startEditingItem(item)}
+                                      >
+                                        <Edit className="h-4 w-4" />
+                                      </Button>
+                                      <Button 
+                                        size="sm" 
+                                        variant="outline" 
+                                        onClick={() => handleRemoveItem(item.id)}
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </Button>
+                                    </div>
                                   </TableCell>
                                 </TableRow>
                               ))}
@@ -1068,6 +1262,109 @@ export default function DocumentsPage() {
                       )}
                     </CardContent>
                   </Card>
+                </div>
+              </DialogContent>
+            </Dialog>
+            
+            {/* View Document Dialog */}
+            <Dialog open={isViewDialogOpen} onOpenChange={setIsViewDialogOpen}>
+              <DialogContent className="w-full max-w-[80vw] sm:max-w-[80vw] md:max-w-[80vw] lg:max-w-[80vw] xl:max-w-[80vw] max-h-[90vh] overflow-y-auto mx-auto my-4 p-0">
+                <DialogHeader>
+                  <DialogTitle>
+                    مشاهده سند
+                  </DialogTitle>
+                </DialogHeader>
+                
+                <div className="space-y-6 p-6">
+                  {viewingDocument && (
+                    <>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <Label>نوع سند</Label>
+                          <div className="mt-1 p-2 bg-gray-50 rounded">
+                            <Badge className={documentTypeColors[viewingDocument.documentType as keyof typeof documentTypeColors]}>
+                              {documentTypeLabels[viewingDocument.documentType as keyof typeof documentTypeLabels]}
+                            </Badge>
+                          </div>
+                        </div>
+                        
+                        <div>
+                          <Label>شماره سند</Label>
+                          <div className="mt-1 p-2 bg-gray-50 rounded ltr-content">
+                            {viewingDocument.documentNumber}
+                          </div>
+                        </div>
+                        
+                        <div>
+                          <Label>طرف حساب</Label>
+                          <div className="mt-1 p-2 bg-gray-50 rounded">
+                            {getPartnerName(viewingDocument)}
+                          </div>
+                        </div>
+                        
+                        <div>
+                          <Label>تاریخ سند</Label>
+                          <div className="mt-1 p-2 bg-gray-50 rounded ltr-content">
+                            {formatDocumentDate(viewingDocument.date)}
+                          </div>
+                        </div>
+                        
+                        <div className="md:col-span-2">
+                          <Label>توضیحات</Label>
+                          <div className="mt-1 p-2 bg-gray-50 rounded">
+                            {viewingDocument.description || "-"}
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <Card>
+                        <CardHeader>
+                          <CardTitle className="text-lg">اقلام سند</CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                          <Table>
+                            <TableHeader>
+                              <TableRow className="rtl-table">
+                                <TableHead>کالا</TableHead>
+                                <TableHead>کد کالا</TableHead>
+                                <TableHead>تعداد</TableHead>
+                                <TableHead>قیمت واحد</TableHead>
+                                <TableHead>قیمت کل</TableHead>
+                                <TableHead>توضیحات</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {viewingDocument.items.map((item) => (
+                                <TableRow key={item.id}>
+                                  <TableCell className="font-medium">{item.product.name}</TableCell>
+                                  <TableCell className="ltr-content">{item.product.code}</TableCell>
+                                  <TableCell className="ltr-content">{formatPersianNumber(item.quantity)}</TableCell>
+                                  <TableCell className="ltr-content">{formatPersianCurrency(item.unitPrice)}</TableCell>
+                                  <TableCell className="ltr-content font-medium">{formatPersianCurrency(item.totalPrice)}</TableCell>
+                                  <TableCell>{item.description || "-"}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                          
+                          <div className="mt-4 pt-4 border-t flex justify-between items-center">
+                            <div className="text-lg font-medium">
+                              جمع کل: {formatPersianCurrency(viewingDocument.totalAmount)}
+                            </div>
+                            <Badge variant={viewingDocument.isFinalized ? "default" : "secondary"}>
+                              {viewingDocument.isFinalized ? "نهایی شده" : "پیش‌نویس"}
+                            </Badge>
+                          </div>
+                        </CardContent>
+                      </Card>
+                      
+                      <div className="flex justify-end gap-2">
+                        <Button variant="outline" onClick={closeViewDialog}>
+                          بستن
+                        </Button>
+                      </div>
+                    </>
+                  )}
                 </div>
               </DialogContent>
             </Dialog>
@@ -1184,13 +1481,19 @@ export default function DocumentsPage() {
         <Card>
           <CardHeader>
             <CardTitle>لیست اسناد</CardTitle>
+            <div className="text-sm text-muted-foreground">
+              تعداد کل اسناد: {documents.length} | تعداد فیلتر شده: {filteredDocuments.length}
+            </div>
           </CardHeader>
           <CardContent>
             {isLoading ? (
               <div className="text-center py-8">در حال بارگذاری...</div>
             ) : filteredDocuments.length === 0 ? (
               <div className="text-center py-8 text-muted-foreground">
-                هیچ سندی یافت نشد
+                {documents.length === 0 ? 
+                  "هیچ سندی در پایگاه داده یافت نشد" : 
+                  "هیچ سندی با فیلترهای انتخابی یافت نشد"
+                }
               </div>
             ) : (
               <Table>
@@ -1207,41 +1510,59 @@ export default function DocumentsPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {filteredDocuments.map((doc) => (
-                    <TableRow key={doc.id}>
-                      <TableCell className="font-medium">{doc.documentNumber}</TableCell>
-                      <TableCell>
-                        <Badge className={documentTypeColors[doc.documentType as keyof typeof documentTypeColors]}>
-                          {documentTypeLabels[doc.documentType as keyof typeof documentTypeLabels]}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <div>
-                          <div className="font-medium">{getPartnerName(doc)}</div>
-                          <div className="text-sm text-muted-foreground">{getPartnerType(doc)}</div>
-                        </div>
-                      </TableCell>
-                      <TableCell className="ltr-content">{formatPersianNumber(doc.items.length)}</TableCell>
-                      <TableCell className="ltr-content font-medium">
-                        {formatPersianCurrency(doc.totalAmount)}
-                      </TableCell>
-                      <TableCell className="ltr-content">
-                        {formatDocumentDate(doc.date)}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={doc.isFinalized ? "default" : "secondary"}>
-                          {doc.isFinalized ? "نهایی شده" : "پیش‌نویس"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex gap-2">
-                          <Button size="sm" variant="outline">
-                            <Eye className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {filteredDocuments.map((doc, index) => {
+                    try {
+                      return (
+                        <TableRow key={doc.id || index}>
+                          <TableCell className="font-medium">{doc.documentNumber || 'نامشخص'}</TableCell>
+                          <TableCell>
+                            <Badge className={documentTypeColors[doc.documentType as keyof typeof documentTypeColors] || 'bg-gray-100 text-gray-800'}>
+                              {documentTypeLabels[doc.documentType as keyof typeof documentTypeLabels] || doc.documentType}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <div>
+                              <div className="font-medium">{getPartnerName(doc)}</div>
+                              <div className="text-sm text-muted-foreground">{getPartnerType(doc)}</div>
+                            </div>
+                          </TableCell>
+                          <TableCell className="ltr-content">{formatPersianNumber(doc.items?.length || 0)}</TableCell>
+                          <TableCell className="ltr-content font-medium">
+                            {formatPersianCurrency(doc.totalAmount || 0)}
+                          </TableCell>
+                          <TableCell className="ltr-content">
+                            {formatDocumentDate(doc.date)}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={doc.isFinalized ? "default" : "secondary"}>
+                              {doc.isFinalized ? "نهایی شده" : "پیش‌نویس"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex gap-2">
+                              <Button size="sm" variant="outline" onClick={() => openViewDialog(doc)}>
+                                <Eye className="h-4 w-4" />
+                              </Button>
+                              {!doc.isFinalized && (
+                                <Button size="sm" variant="outline" onClick={() => openEditDialog(doc)}>
+                                  <Edit className="h-4 w-4" />
+                                </Button>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    } catch (error) {
+                      console.error('Error rendering document row:', error, 'Document:', doc);
+                      return (
+                        <TableRow key={doc.id || index}>
+                          <TableCell colSpan={8} className="text-center text-red-500">
+                            خطا در نمایش سند: {doc.documentNumber || `سند ${index + 1}`}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    }
+                  })}
                 </TableBody>
               </Table>
             )}

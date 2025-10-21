@@ -34,13 +34,7 @@ const navigationItems: NavigationItem[] = [
     icon: <Home className="h-5 w-5" />,
     description: "نمای کلی سیستم"
   },
-  {
-    title: "تاریخ شمسی (نمونه)",
-    href: "/date-demo",
-    icon: <Calendar className="h-5 w-5" />,
-    description: "نمونه انتخابگر تاریخ شمسی"
-  },
-  {
+    {
     title: "آزمایش دیتابیس",
     href: "/debug",
     icon: <Bug className="h-5 w-5" />,

@@ -1,11 +1,63 @@
 import { GraphQLScalarType, Kind } from 'graphql';
 import dbConnect from '@/lib/mongodb';
+
+// Import all models to ensure they are registered with Mongoose
 import { Company } from '@/models/Company';
 import { Product } from '@/models/Product';
 import { Supplier } from '@/models/Supplier';
 import { Customer } from '@/models/Customer';
 import { Document } from '@/models/Document';
 import { InventoryMovement } from '@/models/InventoryMovement';
+
+// Ensure all models are registered by accessing them
+const ensureModelsRegistered = () => {
+  // This ensures all models are loaded and registered with Mongoose
+  Company;
+  Product;
+  Supplier;
+  Customer;
+  Document;
+  InventoryMovement;
+};
+
+// Helper function to process document items safely
+const processDocumentItem = (item: any) => {
+  const itemObject = item.toObject ? item.toObject() : item;
+  // Create a new object without the _id field to avoid conflict with id field
+  const { _id, ...itemWithoutId } = itemObject;
+  
+  // Handle product safely - create a placeholder if product is null
+  let product = {
+    id: "unknown",
+    name: "کالای حذف شده",
+    code: "DELETED",
+    unit: "عدد",
+    isActive: false
+  };
+  
+  if (item.product) {
+    const productObject = item.product.toObject ? item.product.toObject() : item.product;
+    const productId = item.product._id ? item.product._id.toString() : item.product.id;
+    product = {
+      id: productId,
+      ...productObject
+    };
+  }
+  
+  // Ensure totalPrice is always calculated and not null
+  const quantity = item.quantity || 0;
+  const unitPrice = item.unitPrice || 0;
+  const totalPrice = item.totalPrice || (quantity * unitPrice);
+  
+  return {
+    id: item._id.toString(),
+    ...itemWithoutId,
+    quantity: quantity,
+    unitPrice: unitPrice,
+    totalPrice: totalPrice,
+    product: product
+  };
+};
 
 // Custom Date scalar
 const DateScalar = new GraphQLScalarType({
@@ -241,6 +293,9 @@ export const resolvers = {
       }
     ) => {
       await dbConnect();
+      
+      // Ensure all models are registered
+      ensureModelsRegistered();
       const filter: any = {};
       
       if (documentType) {
@@ -271,18 +326,25 @@ export const resolvers = {
         .populate('items.product')
         .sort({ date: -1 });
       
-      return documents.map(doc => ({
-        id: doc._id.toString(),
-        ...doc.toObject(),
-        items: doc.items.map((item: any) => ({
-          id: item._id.toString(),
-          ...item.toObject(),
-          product: {
-            id: item.product._id?.toString() || item.product.id,
-            ...item.product.toObject ? item.product.toObject() : item.product
-          }
-        }))
-      }));
+      const result = documents.map(doc => {
+        const docObject = doc.toObject();
+        const processedDoc = {
+          id: doc._id.toString(),
+          ...docObject,
+          supplier: doc.supplier && doc.supplier._id ? {
+            id: doc.supplier._id.toString(),
+            ...doc.supplier.toObject()
+          } : null,
+          customer: doc.customer ? {
+            id: doc.customer._id.toString(),
+            ...doc.customer.toObject()
+          } : null,
+          items: doc.items.map(processDocumentItem)
+        };
+        return processedDoc;
+      });
+      
+      return result;
     },
 
     getDocument: async (_: any, { id }: { id: string }) => {
@@ -292,17 +354,19 @@ export const resolvers = {
         .populate('customer')
         .populate('items.product');
       if (!document) return null;
+      const docObject = document.toObject();
       return {
         id: document._id.toString(),
-        ...document.toObject(),
-        items: document.items.map((item: any) => ({
-          id: item._id.toString(),
-          ...item.toObject(),
-          product: {
-            id: item.product._id?.toString() || item.product.id,
-            ...item.product.toObject ? item.product.toObject() : item.product
-          }
-        }))
+        ...docObject,
+        supplier: document.supplier && document.supplier._id ? {
+          id: document.supplier._id.toString(),
+          ...document.supplier.toObject()
+        } : null,
+        customer: document.customer ? {
+          id: document.customer._id.toString(),
+          ...document.customer.toObject()
+        } : null,
+        items: document.items.map(processDocumentItem)
       };
     },
 
@@ -779,17 +843,19 @@ export const resolvers = {
         console.log('✅ Document successfully populated and ready for return');
         console.log('🎉 DOCUMENT CREATION COMPLETED SUCCESSFULLY!');
         
+        const docObject = populatedDocument.toObject();
         return {
           id: populatedDocument._id.toString(),
-          ...populatedDocument.toObject(),
-          items: populatedDocument.items.map((item: any) => ({
-            id: item._id.toString(),
-            ...item.toObject(),
-            product: {
-              id: item.product._id?.toString() || item.product.id,
-              ...item.product.toObject ? item.product.toObject() : item.product
-            }
-          }))
+          ...docObject,
+          supplier: populatedDocument.supplier && populatedDocument.supplier._id ? {
+            id: populatedDocument.supplier._id.toString(),
+            ...populatedDocument.supplier.toObject()
+          } : null,
+          customer: populatedDocument.customer && populatedDocument.customer._id ? {
+            id: populatedDocument.customer._id.toString(),
+            ...populatedDocument.customer.toObject()
+          } : null,
+          items: populatedDocument.items.map(processDocumentItem)
         };
       } catch (error) {
         console.error('Error creating document:', error);
@@ -815,28 +881,94 @@ export const resolvers = {
     updateDocument: async (_: any, { id, input }: { id: string; input: any }) => {
       await dbConnect();
       
-      const document = await Document.findByIdAndUpdate(
-        id,
-        { ...input, updatedAt: new Date() },
-        { new: true }
-      ).populate('supplier').populate('customer').populate('items.product');
+      console.log('=== GraphQL updateDocument received ===');
+      console.log('Document ID:', id);
+      console.log('Input:', JSON.stringify(input, null, 2));
       
-      if (!document) {
-        throw new Error('سند یافت نشد');
+      try {
+        // Prepare the update data similar to createDocument
+        let updateData: any = {
+          documentType: input.documentType,
+          documentNumber: input.documentNumber,
+          description: input.description || "",
+          date: input.date instanceof Date ? input.date : new Date(input.date),
+          updatedAt: new Date()
+        };
+        
+        // Handle supplier/customer
+        if (input.supplierId) {
+          updateData.supplier = input.supplierId;
+        } else {
+          updateData.supplier = null;
+        }
+        
+        if (input.customerId) {
+          updateData.customer = input.customerId;
+        } else {
+          updateData.customer = null;
+        }
+        
+        // Process items if provided
+        if (input.items && Array.isArray(input.items)) {
+          console.log('Processing items for update:', input.items.length);
+          
+          const processedItems = input.items.map((item: any) => {
+            console.log('Processing item:', {
+              productId: item.productId,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice
+            });
+            
+            return {
+              product: item.productId,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice,
+              totalPrice: item.quantity * item.unitPrice,
+              description: item.description || ''
+            };
+          });
+          
+          updateData.items = processedItems;
+          
+          // Calculate total amount
+          updateData.totalAmount = processedItems.reduce((sum: number, item: any) => sum + item.totalPrice, 0);
+          console.log('Calculated total amount:', updateData.totalAmount);
+        }
+        
+        console.log('Final update data:', JSON.stringify(updateData, null, 2));
+        
+        const document = await Document.findByIdAndUpdate(
+          id,
+          updateData,
+          { new: true, runValidators: true }
+        ).populate('supplier').populate('customer').populate('items.product');
+        
+        if (!document) {
+          console.error('Document not found for ID:', id);
+          throw new Error('سند یافت نشد');
+        }
+        
+        console.log('✅ Document updated successfully:', document._id);
+        
+        const docObject = document.toObject();
+        return {
+          id: document._id.toString(),
+          ...docObject,
+          supplier: document.supplier && document.supplier._id ? {
+            id: document.supplier._id.toString(),
+            ...document.supplier.toObject()
+          } : null,
+          customer: document.customer && document.customer._id ? {
+            id: document.customer._id.toString(),
+            ...document.customer.toObject()
+          } : null,
+          items: document.items.map(processDocumentItem)
+        };
+        
+      } catch (error) {
+        console.error('❌ Error updating document:', error);
+        throw new Error(`خطا در بروزرسانی سند: ${(error as any).message}`);
       }
-      
-      return {
-        id: document._id.toString(),
-        ...document.toObject(),
-        items: document.items.map((item: any) => ({
-          id: item._id.toString(),
-          ...item.toObject(),
-          product: {
-            id: item.product._id?.toString() || item.product.id,
-            ...item.product.toObject ? item.product.toObject() : item.product
-          }
-        }))
-      };
     },
 
     finalizeDocument: async (_: any, { id }: { id: string }) => {
@@ -852,17 +984,19 @@ export const resolvers = {
         throw new Error('سند یافت نشد');
       }
       
+      const docObject = document.toObject();
       return {
         id: document._id.toString(),
-        ...document.toObject(),
-        items: document.items.map((item: any) => ({
-          id: item._id.toString(),
-          ...item.toObject(),
-          product: {
-            id: item.product._id?.toString() || item.product.id,
-            ...item.product.toObject ? item.product.toObject() : item.product
-          }
-        }))
+        ...docObject,
+        supplier: document.supplier && document.supplier._id ? {
+          id: document.supplier._id.toString(),
+          ...document.supplier.toObject()
+        } : null,
+        customer: document.customer && document.customer._id ? {
+          id: document.customer._id.toString(),
+          ...document.customer.toObject()
+        } : null,
+        items: document.items.map(processDocumentItem)
       };
     },
 
