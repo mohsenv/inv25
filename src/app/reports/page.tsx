@@ -82,6 +82,42 @@ const GET_ALL_DOCUMENTS_FOR_CARDEX = gql`
   }
 `;
 
+// Add new GraphQL query for Document Search
+const GET_ALL_DOCUMENTS_FOR_SEARCH = gql`
+  query GetAllDocumentsForSearch {
+    getDocuments {
+      id
+      documentType
+      documentNumber
+      date
+      isFinalized
+      totalAmount
+      description
+      supplier {
+        id
+        name
+      }
+      customer {
+        id
+        name
+      }
+      items {
+        id
+        product {
+          id
+          name
+          code
+          unit
+        }
+        quantity
+        unitPrice
+        totalPrice
+        description
+      }
+    }
+  }
+`;
+
 const GET_SUPPLIERS_SUMMARY = gql`
   query GetSuppliersSummary {
     getSuppliers {
@@ -127,6 +163,21 @@ interface DocumentItem {
   quantity: number;
   unitPrice: number;
   totalPrice: number;
+}
+
+// Extended interface for search results that includes document information
+interface SearchDocumentItem extends DocumentItem {
+  document: {
+    id: string;
+    documentType: string;
+    documentNumber: string;
+    date: number;
+    isFinalized: boolean;
+    totalAmount?: number;
+    description?: string;
+    supplier?: { id: string; name: string };
+    customer?: { id: string; name: string };
+  };
 }
 
 interface Document {
@@ -178,6 +229,56 @@ interface Customer {
 }
 
 export default function ReportsPage() {
+  // Add print styles
+  if (typeof document !== 'undefined') {
+    const printStyles = `
+      @media print {
+        /* Hide navigation and other UI elements */
+        header, nav, .no-print, [data-no-print] {
+          display: none !important;
+        }
+        
+        /* Hide the tabs list */
+        .grid.w-full.grid-cols-5 {
+          display: none !important;
+        }
+        
+        /* Hide all tab content except product-movements */
+        [value]:not([value='product-movements']) {
+          display: none !important;
+        }
+        
+        /* Make the report full width */
+        .container {
+          max-width: 100% !important;
+          padding: 0 !important;
+        }
+        
+        /* Ensure tables are readable */
+        table {
+          font-size: 12px;
+        }
+        
+        th, td {
+          padding: 4px !important;
+        }
+        
+        /* Prevent page breaks inside rows */
+        tr {
+          page-break-inside: avoid;
+        }
+        
+        /* Add some margins */
+        body {
+          margin: 20px;
+        }
+      }
+    `;
+    
+    const styleElement = document.createElement('style');
+    styleElement.textContent = printStyles;
+    document.head.appendChild(styleElement);
+  }
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [dateFrom, setDateFrom] = useState('');
@@ -195,6 +296,13 @@ export default function ReportsPage() {
   const [selectedProduct, setSelectedProduct] = useState('');
   const [rialCardexData, setRialCardexData] = useState<RialCardexItem[]>([]);
   const [isCalculating, setIsCalculating] = useState(false);
+  
+  // Add state for Document Search
+  const [searchField, setSearchField] = useState('quantity');
+  const [searchOperator, setSearchOperator] = useState('=');
+  const [searchValue, setSearchValue] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchDocumentItem[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
   
   // Load all data on component mount
   useEffect(() => {
@@ -332,6 +440,7 @@ export default function ReportsPage() {
     switch (type) {
       case 'INITIAL_STOCK': return 'موجودی اولیه';
       case 'PURCHASE_INVOICE': return 'خرید';
+      case 'IMPORT': return 'واردات';
       case 'SALE_INVOICE': return 'فروش';
       case 'STOCK_ADJUSTMENT': return 'تعدیل';
       default: return type;
@@ -432,10 +541,10 @@ export default function ReportsPage() {
         let outTotalPrice = 0;
         
         // Categorize documents according to requirements:
-        // "وارده" (Incoming): INITIAL_STOCK, PURCHASE_INVOICE
+        // "وارده" (Incoming): INITIAL_STOCK, PURCHASE_INVOICE, IMPORT
         // "صادره" (Outgoing): SALE_INVOICE
         
-        const isIncoming = entry.documentType === 'INITIAL_STOCK' || entry.documentType === 'PURCHASE_INVOICE';
+        const isIncoming = entry.documentType === 'INITIAL_STOCK' || entry.documentType === 'PURCHASE_INVOICE' || entry.documentType === 'IMPORT';
         const isOutgoing = entry.documentType === 'SALE_INVOICE';
         
         console.log(`Processing ${entry.documentNumber} (${entry.documentType}) - isIncoming: ${isIncoming}, isOutgoing: ${isOutgoing}`);
@@ -520,13 +629,119 @@ export default function ReportsPage() {
     }
   };
 
+  // Function to search documents
+  const searchDocuments = async () => {
+    if (!searchField || !searchOperator || !searchValue) return;
+    
+    setIsSearching(true);
+    setError('');
+    setSearchResults([]);
+    
+    try {
+      const result = await apolloClient.query({
+        query: GET_ALL_DOCUMENTS_FOR_SEARCH,
+        fetchPolicy: 'no-cache',
+        errorPolicy: 'all'
+      });
+      
+      const documents = (result.data as any)?.getDocuments || [];
+      
+      // Flatten all document items into a single array
+      const allItems: SearchDocumentItem[] = [];
+      documents.forEach((doc: any) => {
+        if (doc.items && Array.isArray(doc.items)) {
+          doc.items.forEach((item: any) => {
+            allItems.push({
+              ...item,
+              document: {
+                id: doc.id,
+                documentType: doc.documentType,
+                documentNumber: doc.documentNumber,
+                date: doc.date,
+                isFinalized: doc.isFinalized,
+                totalAmount: doc.totalAmount,
+                description: doc.description,
+                supplier: doc.supplier,
+                customer: doc.customer
+              }
+            });
+          });
+        }
+      });
+      
+      // Filter items based on search criteria
+      const filteredItems = allItems.filter(item => {
+        const value = parseFloat(searchValue);
+        
+        switch (searchField) {
+          case 'quantity':
+            const quantity = item.quantity;
+            switch (searchOperator) {
+              case '=': return quantity === value;
+              case '>=': return quantity >= value;
+              case '<=': return quantity <= value;
+              case 'contains': return quantity.toString().includes(searchValue);
+              default: return false;
+            }
+          case 'unitPrice':
+            const unitPrice = item.unitPrice;
+            switch (searchOperator) {
+              case '=': return unitPrice === value;
+              case '>=': return unitPrice >= value;
+              case '<=': return unitPrice <= value;
+              case 'contains': return unitPrice.toString().includes(searchValue);
+              default: return false;
+            }
+          case 'totalPrice':
+            const totalPrice = item.totalPrice;
+            switch (searchOperator) {
+              case '=': return totalPrice === value;
+              case '>=': return totalPrice >= value;
+              case '<=': return totalPrice <= value;
+              case 'contains': return totalPrice.toString().includes(searchValue);
+              default: return false;
+            }
+          case 'productCode':
+            const productCode = item.product?.code || '';
+            switch (searchOperator) {
+              case '=': return productCode === searchValue;
+              case '>=': return productCode >= searchValue;
+              case '<=': return productCode <= searchValue;
+              case 'contains': return productCode.includes(searchValue);
+              default: return false;
+            }
+          case 'productName':
+            const productName = item.product?.name || '';
+            switch (searchOperator) {
+              case '=': return productName === searchValue;
+              case '>=': return productName >= searchValue;
+              case '<=': return productName <= searchValue;
+              case 'contains': return productName.includes(searchValue);
+              default: return false;
+            }
+          default:
+            return false;
+        }
+      });
+      
+      setSearchResults(filteredItems);
+    } catch (err: any) {
+      console.error('Error searching documents:', err);
+      setError('خطا در جستجوی اسناد: ' + (err.message || 'خطای نامشخص'));
+    } finally {
+      setIsSearching(false);
+    }
+  };
+  
   // Function to calculate product movements for the new report
   const calculateProductMovements = (productId: string) => {
     // Initialize movement data
     const movements = {
       initialStock: { quantity: 0, unitPrice: 0, totalPrice: 0 },
-      incoming: { quantity: 0, unitPrice: 0, totalPrice: 0 },
+      purchase: { quantity: 0, unitPrice: 0, totalPrice: 0 },
+      import: { quantity: 0, unitPrice: 0, totalPrice: 0 },
       outgoing: { quantity: 0, unitPrice: 0, totalPrice: 0 },
+      readyForSale: { quantity: 0, unitPrice: 0, totalPrice: 0 },
       balance: { quantity: 0, unitPrice: 0, totalPrice: 0 }
     };
 
@@ -554,10 +769,17 @@ export default function ReportsPage() {
                 : 0;
             } 
             else if (doc.documentType === 'PURCHASE_INVOICE') {
-              movements.incoming.quantity += quantity;
-              movements.incoming.totalPrice += totalPrice;
-              movements.incoming.unitPrice = movements.incoming.quantity > 0 
-                ? movements.incoming.totalPrice / movements.incoming.quantity 
+              movements.purchase.quantity += quantity;
+              movements.purchase.totalPrice += totalPrice;
+              movements.purchase.unitPrice = movements.purchase.quantity > 0 
+                ? movements.purchase.totalPrice / movements.purchase.quantity 
+                : 0;
+            }
+            else if (doc.documentType === 'IMPORT') {
+              movements.import.quantity += quantity;
+              movements.import.totalPrice += totalPrice;
+              movements.import.unitPrice = movements.import.quantity > 0 
+                ? movements.import.totalPrice / movements.import.quantity 
                 : 0;
             } 
             else if (doc.documentType === 'SALE_INVOICE') {
@@ -572,16 +794,26 @@ export default function ReportsPage() {
       }
     });
 
+    // Calculate ready for sale (initial stock + purchase + import)
+    movements.readyForSale.quantity = 
+      movements.initialStock.quantity + movements.purchase.quantity + movements.import.quantity;
+    
+    movements.readyForSale.totalPrice = 
+      movements.initialStock.totalPrice + movements.purchase.totalPrice + movements.import.totalPrice;
+    
+    movements.readyForSale.unitPrice = movements.readyForSale.quantity > 0 
+      ? movements.readyForSale.totalPrice / movements.readyForSale.quantity 
+      : 0;
+
     // Calculate balance
     movements.balance.quantity = 
-      movements.initialStock.quantity + movements.incoming.quantity - movements.outgoing.quantity;
+      movements.initialStock.quantity + movements.purchase.quantity + movements.import.quantity - movements.outgoing.quantity;
   
-    movements.balance.totalPrice = 
-      movements.initialStock.totalPrice + movements.incoming.totalPrice - movements.outgoing.totalPrice;
-  
-    movements.balance.unitPrice = movements.balance.quantity > 0 
-      ? movements.balance.totalPrice / movements.balance.quantity 
-      : 0;
+    // Use readyForSale unit price for balance unit price as requested
+    movements.balance.unitPrice = movements.readyForSale.unitPrice;
+    
+    // Calculate balance total price by multiplying remaining quantity by average price (فی کالای آماده فروش)
+    movements.balance.totalPrice = movements.balance.quantity * movements.balance.unitPrice;
 
     return movements;
   };
@@ -591,8 +823,10 @@ export default function ReportsPage() {
     // Initialize totals
     const totals = {
       initialStock: { quantity: 0, unitPrice: 0, totalPrice: 0 },
-      incoming: { quantity: 0, unitPrice: 0, totalPrice: 0 },
+      purchase: { quantity: 0, unitPrice: 0, totalPrice: 0 },
+      import: { quantity: 0, unitPrice: 0, totalPrice: 0 },
       outgoing: { quantity: 0, unitPrice: 0, totalPrice: 0 },
+      readyForSale: { quantity: 0, unitPrice: 0, totalPrice: 0 },
       balance: { quantity: 0, unitPrice: 0, totalPrice: 0 }
     };
 
@@ -600,11 +834,47 @@ export default function ReportsPage() {
     products.filter(p => p.isActive).forEach(product => {
       const productMovements = calculateProductMovements(product.id);
     
+      totals.initialStock.quantity += productMovements.initialStock.quantity;
       totals.initialStock.totalPrice += productMovements.initialStock.totalPrice;
-      totals.incoming.totalPrice += productMovements.incoming.totalPrice;
+      
+      totals.purchase.quantity += productMovements.purchase.quantity;
+      totals.purchase.totalPrice += productMovements.purchase.totalPrice;
+      
+      totals.import.quantity += productMovements.import.quantity;
+      totals.import.totalPrice += productMovements.import.totalPrice;
+      
+      totals.readyForSale.quantity += productMovements.readyForSale.quantity;
+      totals.readyForSale.totalPrice += productMovements.readyForSale.totalPrice;
+      
+      totals.outgoing.quantity += productMovements.outgoing.quantity;
       totals.outgoing.totalPrice += productMovements.outgoing.totalPrice;
+      
+      totals.balance.quantity += productMovements.balance.quantity;
       totals.balance.totalPrice += productMovements.balance.totalPrice;
     });
+    
+    // Calculate unit prices for totals (weighted average)
+    totals.initialStock.unitPrice = totals.initialStock.quantity > 0 
+      ? totals.initialStock.totalPrice / totals.initialStock.quantity 
+      : 0;
+      
+    totals.purchase.unitPrice = totals.purchase.quantity > 0 
+      ? totals.purchase.totalPrice / totals.purchase.quantity 
+      : 0;
+      
+    totals.import.unitPrice = totals.import.quantity > 0 
+      ? totals.import.totalPrice / totals.import.quantity 
+      : 0;
+      
+    totals.readyForSale.unitPrice = totals.readyForSale.quantity > 0 
+      ? totals.readyForSale.totalPrice / totals.readyForSale.quantity 
+      : 0;
+      
+    totals.outgoing.unitPrice = totals.outgoing.quantity > 0 
+      ? totals.outgoing.totalPrice / totals.outgoing.quantity 
+      : 0;
+      
+    totals.balance.unitPrice = totals.readyForSale.unitPrice;
 
     return totals;
   };
@@ -751,11 +1021,12 @@ export default function ReportsPage() {
         </div>
 
         <Tabs defaultValue="products" className="space-y-4">
-          <TabsList className="grid w-full grid-cols-4">
+          <TabsList className="grid w-full grid-cols-5 no-print">
             <TabsTrigger value="products">گزارش کالاها</TabsTrigger>
             <TabsTrigger value="documents">گزارش اسناد</TabsTrigger>
             <TabsTrigger value="rial-cardex">کاردکس ریالی</TabsTrigger>
             <TabsTrigger value="product-movements">گردش ریالی کالاها</TabsTrigger>
+            <TabsTrigger value="document-search">جستجو در اسناد</TabsTrigger>
           </TabsList>
 
           <TabsContent value="products" className="space-y-4">
@@ -929,11 +1200,18 @@ export default function ReportsPage() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="product-movements" className="space-y-4">
+          <TabsContent value="product-movements" className="space-y-4" id="product-movements-tab">
             <Card>
               <CardHeader>
-                <CardTitle>گردش ریالی کالاها</CardTitle>
-                <p className="text-sm text-gray-600">خلاصه‌ای از گردش مالی هر کالا</p>
+                <div className="flex justify-between items-center">
+                  <div>
+                    <CardTitle>گردش ریالی کالاها</CardTitle>
+                    <p className="text-sm text-gray-600">خلاصه‌ای از گردش مالی هر کالا</p>
+                  </div>
+                  <Button onClick={() => window.print()} className="no-print">
+                    چاپ گزارش
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent>
                 <Table>
@@ -944,14 +1222,20 @@ export default function ReportsPage() {
                       <TableHead className="text-right">موجودی اولیه (تعداد)</TableHead>
                       <TableHead className="text-right">موجودی اولیه (فی)</TableHead>
                       <TableHead className="text-right">موجودی اولیه (ارزش)</TableHead>
-                      <TableHead className="text-right">ورودی (تعداد)</TableHead>
-                      <TableHead className="text-right">ورودی (فی)</TableHead>
-                      <TableHead className="text-right">ورودی (ارزش)</TableHead>
+                      <TableHead className="text-right">خرید کالا (تعداد)</TableHead>
+                      <TableHead className="text-right">خرید کالا (فی)</TableHead>
+                      <TableHead className="text-right">خرید کالا (ارزش)</TableHead>
+                      <TableHead className="text-right">واردات کالا (تعداد)</TableHead>
+                      <TableHead className="text-right">واردات کالا (فی)</TableHead>
+                      <TableHead className="text-right">واردات کالا (ارزش)</TableHead>
+                      <TableHead className="text-right">کالای آماده فروش (تعداد)</TableHead>
+                      <TableHead className="text-right">کالای آماده فروش (فی)</TableHead>
+                      <TableHead className="text-right">کالای آماده فروش (ارزش)</TableHead>
                       <TableHead className="text-right">خروجی (تعداد)</TableHead>
                       <TableHead className="text-right">خروجی (فی)</TableHead>
                       <TableHead className="text-right">خروجی (ارزش)</TableHead>
                       <TableHead className="text-right">مانده (تعداد)</TableHead>
-                      <TableHead className="text-right">مانده (فی)</TableHead>
+                      <TableHead className="text-right">فی کالای آماده فروش</TableHead>
                       <TableHead className="text-right">مانده (ارزش)</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -967,15 +1251,21 @@ export default function ReportsPage() {
                           <TableCell className="text-right">{productMovements.initialStock.quantity.toLocaleString()}</TableCell>
                           <TableCell className="text-right">{Math.round(productMovements.initialStock.unitPrice).toLocaleString()}</TableCell>
                           <TableCell className="text-right">{Math.round(productMovements.initialStock.totalPrice).toLocaleString()}</TableCell>
-                          <TableCell className="text-right">{productMovements.incoming.quantity.toLocaleString()}</TableCell>
-                          <TableCell className="text-right">{Math.round(productMovements.incoming.unitPrice).toLocaleString()}</TableCell>
-                          <TableCell className="text-right">{Math.round(productMovements.incoming.totalPrice).toLocaleString()}</TableCell>
+                          <TableCell className="text-right">{productMovements.purchase.quantity.toLocaleString()}</TableCell>
+                          <TableCell className="text-right">{Math.round(productMovements.purchase.unitPrice).toLocaleString()}</TableCell>
+                          <TableCell className="text-right">{Math.round(productMovements.purchase.totalPrice).toLocaleString()}</TableCell>
+                          <TableCell className="text-right">{productMovements.import.quantity.toLocaleString()}</TableCell>
+                          <TableCell className="text-right">{Math.round(productMovements.import.unitPrice).toLocaleString()}</TableCell>
+                          <TableCell className="text-right">{Math.round(productMovements.import.totalPrice).toLocaleString()}</TableCell>
+                          <TableCell className="text-right">{productMovements.readyForSale.quantity.toLocaleString()}</TableCell>
+                          <TableCell className="text-right">{Math.round(productMovements.readyForSale.unitPrice).toLocaleString()}</TableCell>
+                          <TableCell className="text-right">{Math.round(productMovements.readyForSale.totalPrice).toLocaleString()}</TableCell>
                           <TableCell className="text-right">{productMovements.outgoing.quantity.toLocaleString()}</TableCell>
                           <TableCell className="text-right">{Math.round(productMovements.outgoing.unitPrice).toLocaleString()}</TableCell>
                           <TableCell className="text-right">{Math.round(productMovements.outgoing.totalPrice).toLocaleString()}</TableCell>
                           <TableCell className="text-right font-medium">{productMovements.balance.quantity.toLocaleString()}</TableCell>
-                          <TableCell className="text-right font-medium">{Math.round(productMovements.balance.unitPrice).toLocaleString()}</TableCell>
-                          <TableCell className="text-right font-medium">{Math.round(productMovements.balance.totalPrice).toLocaleString()}</TableCell>
+                          <TableCell className="text-right font-medium">{productMovements.balance.quantity > 0 ? Math.round(productMovements.balance.unitPrice).toLocaleString() : '-'}</TableCell>
+                          <TableCell className="text-right font-medium">{productMovements.balance.quantity > 0 ? Math.round(productMovements.balance.totalPrice).toLocaleString() : '-'}</TableCell>
                         </TableRow>
                       );
                     })}
@@ -985,9 +1275,15 @@ export default function ReportsPage() {
                       <TableCell className="text-right">{calculateTotalMovements().initialStock.quantity.toLocaleString()}</TableCell>
                       <TableCell className="text-right">{Math.round(calculateTotalMovements().initialStock.unitPrice).toLocaleString()}</TableCell>
                       <TableCell className="text-right">{Math.round(calculateTotalMovements().initialStock.totalPrice).toLocaleString()}</TableCell>
-                      <TableCell className="text-right">{calculateTotalMovements().incoming.quantity.toLocaleString()}</TableCell>
-                      <TableCell className="text-right">{Math.round(calculateTotalMovements().incoming.unitPrice).toLocaleString()}</TableCell>
-                      <TableCell className="text-right">{Math.round(calculateTotalMovements().incoming.totalPrice).toLocaleString()}</TableCell>
+                      <TableCell className="text-right">{calculateTotalMovements().purchase.quantity.toLocaleString()}</TableCell>
+                      <TableCell className="text-right">{Math.round(calculateTotalMovements().purchase.unitPrice).toLocaleString()}</TableCell>
+                      <TableCell className="text-right">{Math.round(calculateTotalMovements().purchase.totalPrice).toLocaleString()}</TableCell>
+                      <TableCell className="text-right">{calculateTotalMovements().import.quantity.toLocaleString()}</TableCell>
+                      <TableCell className="text-right">{Math.round(calculateTotalMovements().import.unitPrice).toLocaleString()}</TableCell>
+                      <TableCell className="text-right">{Math.round(calculateTotalMovements().import.totalPrice).toLocaleString()}</TableCell>
+                      <TableCell className="text-right">{calculateTotalMovements().readyForSale.quantity.toLocaleString()}</TableCell>
+                      <TableCell className="text-right">{Math.round(calculateTotalMovements().readyForSale.unitPrice).toLocaleString()}</TableCell>
+                      <TableCell className="text-right">{Math.round(calculateTotalMovements().readyForSale.totalPrice).toLocaleString()}</TableCell>
                       <TableCell className="text-right">{calculateTotalMovements().outgoing.quantity.toLocaleString()}</TableCell>
                       <TableCell className="text-right">{Math.round(calculateTotalMovements().outgoing.unitPrice).toLocaleString()}</TableCell>
                       <TableCell className="text-right">{Math.round(calculateTotalMovements().outgoing.totalPrice).toLocaleString()}</TableCell>
@@ -997,6 +1293,111 @@ export default function ReportsPage() {
                     </TableRow>
                   </TableBody>
                 </Table>
+              </CardContent>
+            </Card>
+          </TabsContent>
+          <TabsContent value="document-search" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>جستجو در اسناد</CardTitle>
+                <p className="text-sm text-gray-600">جستجو در خطوط سند بر اساس فیلدهای مختلف</p>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                  <div>
+                    <Label htmlFor="searchField">فیلد</Label>
+                    <Select value={searchField} onValueChange={setSearchField}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="انتخاب فیلد" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="quantity">تعداد</SelectItem>
+                        <SelectItem value="unitPrice">قیمت واحد</SelectItem>
+                        <SelectItem value="totalPrice">قیمت کل</SelectItem>
+                        <SelectItem value="productCode">کد کالا</SelectItem>
+                        <SelectItem value="productName">نام کالا</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  
+                  <div>
+                    <Label htmlFor="searchOperator">عملگر</Label>
+                    <Select value={searchOperator} onValueChange={setSearchOperator}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="انتخاب عملگر" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="=">مساوی</SelectItem>
+                        <SelectItem value=">=">بزرگتر یا مساوی</SelectItem>
+                        <SelectItem value="<=">کوچکتر یا مساوی</SelectItem>
+                        <SelectItem value="contains">شامل</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  
+                  <div>
+                    <Label htmlFor="searchValue">مقدار</Label>
+                    <Input
+                      id="searchValue"
+                      value={searchValue}
+                      onChange={(e) => setSearchValue(e.target.value)}
+                      placeholder="مقدار جستجو"
+                    />
+                  </div>
+                  
+                  <div className="flex items-end">
+                    <Button onClick={searchDocuments} disabled={isSearching}>
+                      {isSearching ? 'در حال جستجو...' : 'جستجو'}
+                    </Button>
+                  </div>
+                </div>
+                
+                {isSearching && (
+                  <div className="text-center py-4">در حال جستجو...</div>
+                )}
+                
+                {searchResults.length > 0 && !isSearching && (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>شماره سند</TableHead>
+                        <TableHead>نوع سند</TableHead>
+                        <TableHead>کالا</TableHead>
+                        <TableHead>کد کالا</TableHead>
+                        <TableHead>تعداد</TableHead>
+                        <TableHead>قیمت واحد</TableHead>
+                        <TableHead>قیمت کل</TableHead>
+                        <TableHead>تاریخ</TableHead>
+                        <TableHead>طرف حساب</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {searchResults.map((item, index) => (
+                        <TableRow key={`${item.document.id}-${item.id}`}>
+                          <TableCell className="font-medium">{item.document.documentNumber}</TableCell>
+                          <TableCell>
+                            <Badge className={getDocumentTypeBadgeColor(item.document.documentType)}>
+                              {getDocumentTypeLabel(item.document.documentType)}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>{item.product?.name || '-'}</TableCell>
+                          <TableCell>{item.product?.code || '-'}</TableCell>
+                          <TableCell className="text-right">{item.quantity.toLocaleString()}</TableCell>
+                          <TableCell className="text-right">{item.unitPrice.toLocaleString()}</TableCell>
+                          <TableCell className="text-right">{item.totalPrice.toLocaleString()}</TableCell>
+                          <TableCell>{formatDate(item.document.date)}</TableCell>
+                          <TableCell>
+                            {item.document.supplier?.name || item.document.customer?.name || '-'}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+                
+                {searchResults.length === 0 && !isSearching && searchValue && (
+                  <div className="text-center py-4 text-gray-500">هیچ نتیجه‌ای یافت نشد</div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>

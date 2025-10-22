@@ -736,9 +736,9 @@ export const resolvers = {
         console.log('✅ Calculated total amount:', totalAmount);
         
         // Validate supplier/customer requirements based on document type
-        if (input.documentType === 'PURCHASE_INVOICE' && !input.supplierId) {
-          console.error('❌ Validation failed: Missing supplier for purchase invoice');
-          throw new Error('تامین‌کننده برای فاکتور خرید الزامی است');
+        if ((input.documentType === 'PURCHASE_INVOICE' || input.documentType === 'IMPORT') && !input.supplierId) {
+          console.error('❌ Validation failed: Missing supplier for purchase invoice or import document');
+          throw new Error('تامین‌کننده برای فاکتور خرید و ورود کالا الزامی است');
         }
         
         if (input.documentType === 'SALE_INVOICE' && !input.customerId) {
@@ -790,14 +790,16 @@ export const resolvers = {
           });
           
           try {
-            // Ensure quantity is positive for initial stock
+            // Ensure quantity is positive for initial stock and import documents
             const quantity = input.documentType === 'INITIAL_STOCK' ? Math.abs(item.quantity) : 
                             input.documentType === 'PURCHASE_INVOICE' ? Math.abs(item.quantity) :
+                            input.documentType === 'IMPORT' ? Math.abs(item.quantity) :
                             input.documentType === 'SALE_INVOICE' ? -Math.abs(item.quantity) : 
                             item.quantity;
             
             const movementType = input.documentType === 'INITIAL_STOCK' ? 'INITIAL_STOCK' :
                                input.documentType === 'PURCHASE_INVOICE' ? 'PURCHASE' :
+                               input.documentType === 'IMPORT' ? 'PURCHASE' :
                                input.documentType === 'SALE_INVOICE' ? 'SALE' : 'ADJUSTMENT_IN';
             
             console.log('🔄 Movement details:', {

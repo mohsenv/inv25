@@ -145,6 +145,7 @@ export const typeDefs = gql`
     SALE_INVOICE
     STOCK_ADJUSTMENT
     INITIAL_STOCK
+    IMPORT
   }
 
   input CompanyInput {

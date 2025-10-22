@@ -245,7 +245,7 @@ const documentItemSchema = z.object({
 });
 
 const documentSchema = z.object({
-  documentType: z.enum(["PURCHASE_INVOICE", "SALE_INVOICE", "STOCK_ADJUSTMENT", "INITIAL_STOCK"]),
+  documentType: z.enum(["PURCHASE_INVOICE", "SALE_INVOICE", "STOCK_ADJUSTMENT", "INITIAL_STOCK", "IMPORT"]),
   documentNumber: z.string().min(1, "شماره سند الزامی است"),
   supplierId: z.string().optional(),
   customerId: z.string().optional(),
@@ -312,14 +312,16 @@ const documentTypeLabels = {
   INITIAL_STOCK: "موجودی اولیه",
   PURCHASE_INVOICE: "فاکتور خرید", 
   SALE_INVOICE: "فاکتور فروش",
-  STOCK_ADJUSTMENT: "تعدیل موجودی"
+  STOCK_ADJUSTMENT: "تعدیل موجودی",
+  IMPORT: "واردات کالا"
 };
 
 const documentTypeColors = {
   INITIAL_STOCK: "bg-blue-100 text-blue-800",
   PURCHASE_INVOICE: "bg-green-100 text-green-800",
   SALE_INVOICE: "bg-orange-100 text-orange-800", 
-  STOCK_ADJUSTMENT: "bg-purple-100 text-purple-800"
+  STOCK_ADJUSTMENT: "bg-purple-100 text-purple-800",
+  IMPORT: "bg-indigo-100 text-indigo-800"
 };
 
 export default function DocumentsPage() {
@@ -425,9 +427,9 @@ export default function DocumentsPage() {
         errorPolicy: 'all'
       });
       
-      if (result.errors) {
-        console.error('GraphQL Errors:', result.errors);
-        setError(`خطای GraphQL: ${result.errors.map(e => e.message).join(', ')}`);
+      if (result.error) {
+        console.error('GraphQL Error:', result.error);
+        setError(`خطای GraphQL: ${result.error.message}`);
         return;
       }
       
@@ -897,6 +899,7 @@ export default function DocumentsPage() {
                                   <SelectItem value="SALE_INVOICE">فاکتور فروش</SelectItem>
                                   <SelectItem value="STOCK_ADJUSTMENT">تعدیل موجودی</SelectItem>
                                   <SelectItem value="INITIAL_STOCK">موجودی اولیه</SelectItem>
+                                  <SelectItem value="IMPORT">ورود کالا</SelectItem>
                                 </SelectContent>
                               </Select>
                               <FormMessage />
@@ -1408,6 +1411,7 @@ export default function DocumentsPage() {
                     <SelectItem value="PURCHASE_INVOICE">فاکتور خرید</SelectItem>
                     <SelectItem value="SALE_INVOICE">فاکتور فروش</SelectItem>
                     <SelectItem value="STOCK_ADJUSTMENT">تعدیل موجودی</SelectItem>
+                    <SelectItem value="IMPORT">ورود کالا</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

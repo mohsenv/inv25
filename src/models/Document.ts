@@ -4,7 +4,8 @@ enum DocumentType {
   PURCHASE_INVOICE = 'PURCHASE_INVOICE',
   SALE_INVOICE = 'SALE_INVOICE',
   STOCK_ADJUSTMENT = 'STOCK_ADJUSTMENT',
-  INITIAL_STOCK = 'INITIAL_STOCK'
+  INITIAL_STOCK = 'INITIAL_STOCK',
+  IMPORT = 'IMPORT'
 }
 
 interface IDocumentItem {
@@ -78,13 +79,13 @@ const DocumentSchema: Schema = new Schema(
       ref: 'Supplier',
       validate: {
         validator: function(this: IDocument, v: mongoose.Types.ObjectId) {
-          // Supplier is required for purchase invoices
-          if (this.documentType === DocumentType.PURCHASE_INVOICE) {
+          // Supplier is required for purchase invoices and import documents
+          if (this.documentType === DocumentType.PURCHASE_INVOICE || this.documentType === DocumentType.IMPORT) {
             return !!v;
           }
           return true;
         },
-        message: 'تامین کننده برای فاکتور خرید الزامی است'
+        message: 'تامین کننده برای فاکتور خرید و ورود کالا الزامی است'
       }
     },
     customer: {
